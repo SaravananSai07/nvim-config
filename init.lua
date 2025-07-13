@@ -416,7 +416,6 @@ require('lazy').setup({
       vim.keymap.set('n', '<leader>sh', builtin.help_tags, { desc = '[S]earch [H]elp' })
       vim.keymap.set('n', '<leader>sk', builtin.keymaps, { desc = '[S]earch [K]eymaps' })
       vim.keymap.set('n', '<leader>sf', builtin.find_files, { desc = '[S]earch [F]iles' })
-      vim.keymap.set('n', '<leader>sb', builtin.find_files, { desc = '[S]earch [B]uffers' })
       vim.keymap.set('n', '<leader>ss', builtin.builtin, { desc = '[S]earch [S]elect Telescope' })
       vim.keymap.set('n', '<leader>sw', builtin.grep_string, { desc = '[S]earch current [W]ord' })
       vim.keymap.set('n', '<leader>sg', builtin.live_grep, { desc = '[S]earch by [G]rep' })
@@ -424,6 +423,67 @@ require('lazy').setup({
       vim.keymap.set('n', '<leader>sr', builtin.resume, { desc = '[S]earch [R]esume' })
       vim.keymap.set('n', '<leader>s.', builtin.oldfiles, { desc = '[S]earch Recent Files ("." for repeat)' })
       vim.keymap.set('n', '<leader><leader>', builtin.buffers, { desc = '[ ] Find existing buffers' })
+
+      vim.keymap.set('n', '<leader>sb', function()
+        local pickers = require 'telescope.pickers'
+        local finders = require 'telescope.finders'
+        local conf = require('telescope.config').values
+        local actions = require 'telescope.actions'
+        local action_state = require 'telescope.actions.state'
+
+        -- Get all buffers and mark unsaved ones with *
+        local buffers = {}
+        for bufnr = 1, vim.fn.bufnr '$' do
+          if vim.fn.buflisted(bufnr) == 1 then
+            local name = vim.fn.bufname(bufnr)
+            local is_modified = vim.fn.getbufvar(bufnr, '&modified') == 1
+            local display_name
+            if name == '' then
+              display_name = '[No Name]'
+            else
+              display_name = vim.fn.fnamemodify(name, ':~:.')
+            end
+
+            if is_modified then
+              display_name = '* ' .. display_name
+            end
+
+            table.insert(buffers, {
+              bufnr = bufnr,
+              name = name,
+              display_name = display_name,
+              modified = is_modified,
+            })
+          end
+        end
+
+        pickers
+          .new({}, {
+            prompt_title = 'Buffers (with unsaved changes marked *)',
+            finder = finders.new_table {
+              results = buffers,
+              entry_maker = function(entry)
+                return {
+                  value = entry.bufnr,
+                  display = entry.display_name,
+                  ordinal = entry.display_name,
+                  bufnr = entry.bufnr,
+                  modified = entry.modified,
+                }
+              end,
+            },
+            sorter = conf.generic_sorter {},
+            attach_mappings = function(prompt_bufnr, map)
+              actions.select_default:replace(function()
+                actions.close(prompt_bufnr)
+                local selection = action_state.get_selected_entry()
+                vim.api.nvim_win_set_buf(0, selection.bufnr)
+              end)
+              return true
+            end,
+          })
+          :find()
+      end, { desc = '[S]earch [B]uffers' })
 
       -- Slightly advanced example of overriding default behavior and theme
       vim.keymap.set('n', '<leader>sc/', function()
