@@ -156,6 +156,14 @@ vim.opt.scrolloff = 10
 -- See `:help 'confirm'`
 vim.opt.confirm = true
 
+-- [[ Folding ]]
+-- See `:help fold-expr`
+vim.opt.foldmethod = 'expr'
+vim.opt.foldexpr = 'nvim_treesitter#foldexpr()'
+vim.opt.foldenable = true
+-- Start with most folds closed
+vim.opt.foldlevel = 99
+
 -- [[ Basic Keymaps ]]
 --  See `:help vim.keymap.set()`
 
@@ -334,6 +342,7 @@ require('lazy').setup({
         { '<leader>s', group = '[S]earch' },
         { '<leader>t', group = '[T]oggle' },
         { '<leader>h', group = 'Git [H]unk', mode = { 'n', 'v' } },
+        { '<leader>q', group = 'Cursor [A]gent' },
       },
     },
   },
@@ -431,6 +440,11 @@ require('lazy').setup({
           ignore_current_buffer = true,
         }
       end, { desc = '[ ] Find existing buffers' })
+
+      -- Keybind to search for functions in the current file
+      vim.keymap.set('n', '<leader>sF', function()
+        require('telescope.builtin').lsp_document_symbols { default_text = 'Function' }
+      end, { desc = '[S]earch for [F]unctions' })
 
       vim.keymap.set('n', '<leader>sb', function()
         local pickers = require 'telescope.pickers'
@@ -780,7 +794,10 @@ require('lazy').setup({
       vim.list_extend(ensure_installed, {
         'stylua', -- Used to format Lua code
       })
-      require('mason-tool-installer').setup { ensure_installed = ensure_installed }
+      require('mason-tool-installer').setup {
+        ensure_installed = ensure_installed,
+        run_on_start = true,
+      }
 
       require('mason-lspconfig').setup {
         ensure_installed = {}, -- explicitly set to an empty table (Kickstart populates installs via mason-tool-installer)
