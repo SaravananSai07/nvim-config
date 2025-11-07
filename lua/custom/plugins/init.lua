@@ -52,4 +52,120 @@ return {
     end,
   },
 
+  {
+    'MeanderingProgrammer/render-markdown.nvim',
+    dependencies = { 'nvim-treesitter/nvim-treesitter', 'nvim-tree/nvim-web-devicons' },
+    ft = { 'markdown' }, -- Load only for markdown files
+    opts = {
+      enabled = true,
+      -- Render markdown in buffers with these names
+      file_types = { 'markdown' },
+      -- Code blocks will use treesitter highlighting
+      code = {
+        enabled = true,
+        sign = true,
+        style = 'full',
+        position = 'left',
+        width = 'block',
+        left_pad = 0,
+        right_pad = 0,
+        min_width = 0,
+        border = 'thin',
+      },
+      -- Headings
+      heading = {
+        enabled = true,
+        sign = true,
+        position = 'overlay',
+        icons = { '󰲡 ', '󰲣 ', '󰲥 ', '󰲧 ', '󰲩 ', '󰲫 ' },
+        signs = { '󰫎 ' },
+        width = 'full',
+        left_pad = 0,
+        right_pad = 0,
+        min_width = 0,
+      },
+      -- Bullet points
+      bullet = {
+        enabled = true,
+        icons = { '●', '○', '◆', '◇' },
+        left_pad = 0,
+        right_pad = 0,
+      },
+      -- Checkboxes
+      checkbox = {
+        enabled = true,
+        unchecked = { icon = '󰄱 ' },
+        checked = { icon = '󰱒 ' },
+        custom = {
+          todo = { raw = '[-]', rendered = '󰥔 ', highlight = 'RenderMarkdownTodo' },
+        },
+      },
+      -- Inline code
+      code_inline = {
+        enabled = true,
+        highlight = 'RenderMarkdownCode',
+      },
+      -- Quote blocks
+      quote = {
+        enabled = true,
+        icon = '▋',
+        repeat_linebreak = false,
+      },
+      -- Tables
+      pipe_table = {
+        enabled = true,
+        style = 'full',
+        cell = 'padded',
+        border = {
+          '┌', '┬', '┐',
+          '├', '┼', '┤',
+          '└', '┴', '┘',
+          '│', '─',
+        },
+      },
+      -- Links
+      link = {
+        enabled = true,
+        image = '󰥶 ',
+        hyperlink = '󰌹 ',
+      },
+      -- Anti-conceal: show raw markdown when cursor is on the line
+      anti_conceal = {
+        enabled = true,
+      },
+      -- Window options
+      win_options = {
+        conceallevel = {
+          default = vim.o.conceallevel,
+          rendered = 3,
+        },
+        concealcursor = {
+          default = vim.o.concealcursor,
+          rendered = '',
+        },
+      },
+    },
+    config = function(_, opts)
+      require('render-markdown').setup(opts)
+      
+      -- Control render-markdown behavior for different buffers
+      vim.api.nvim_create_autocmd({ 'BufEnter', 'BufWinEnter' }, {
+        pattern = '*',
+        callback = function()
+          local bufname = vim.api.nvim_buf_get_name(0)
+          if bufname:match('Cursor Input') then
+            -- COMPLETELY disable render-markdown for chat window to prevent invisible text
+            vim.cmd('RenderMarkdown disable')
+            vim.wo.conceallevel = 0
+            vim.wo.concealcursor = ''
+            vim.notify('📝 Chat window ready (markdown rendering disabled for clarity)', vim.log.levels.DEBUG)
+          elseif vim.bo.filetype == 'markdown' then
+            -- For regular markdown files, use full rendering
+            vim.cmd('RenderMarkdown enable')
+          end
+        end,
+      })
+    end,
+  },
+
 }
