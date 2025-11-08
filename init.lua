@@ -156,6 +156,17 @@ vim.opt.scrolloff = 10
 -- See `:help 'confirm'`
 vim.opt.confirm = true
 
+-- [[ Swap File Configuration ]]
+-- Keep swap files for crash recovery but organize them in a dedicated directory
+vim.opt.swapfile = true
+local swap_dir = vim.fn.stdpath 'state' .. '/swap'
+vim.fn.mkdir(swap_dir, 'p')
+vim.opt.directory = swap_dir
+
+-- [[ Auto-reload Configuration ]]
+-- Automatically reload files when they change externally (e.g., after git pull)
+vim.opt.autoread = true
+
 -- [[ Folding ]]
 -- See `:help fold-expr`
 vim.opt.foldmethod = 'expr'
@@ -214,6 +225,74 @@ vim.api.nvim_create_autocmd('TextYankPost', {
   group = vim.api.nvim_create_augroup('kickstart-highlight-yank', { clear = true }),
   callback = function()
     vim.highlight.on_yank()
+  end,
+})
+
+-- [[ Smart Swap File Handling ]]
+-- Automatically handle stale swap files while preserving crash recovery
+vim.api.nvim_create_autocmd('SwapExists', {
+  desc = 'Intelligently handle swap files',
+  group = vim.api.nvim_create_augroup('smart-swap-handling', { clear = true }),
+  callback = function(args)
+    local swap_file = vim.fn.swapname()
+    local file_time = vim.fn.getftime(args.file)
+    local swap_time = vim.fn.getftime(swap_file)
+    local time_diff = file_time - swap_time
+
+    -- Auto-delete stale swap files
+    if time_diff > 3600 then
+      -- File is 1+ hour newer than swap → swap is stale
+      vim.v.swapchoice = 'd'
+      vim.notify('Deleted stale swap file (file was updated)', vim.log.levels.INFO)
+    elseif math.abs(time_diff) <= 5 then
+      -- Times are within 5 seconds → likely saved but forgot to exit
+      vim.v.swapchoice = 'd'
+      vim.notify('Deleted swap file from previous session', vim.log.levels.INFO)
+    elseif swap_time > file_time then
+      -- Swap is newer → might have unsaved changes, show recovery dialog
+      vim.v.swapchoice = ''
+    else
+      -- Default: delete stale swap
+      vim.v.swapchoice = 'd'
+      vim.notify('Deleted stale swap file', vim.log.levels.INFO)
+    end
+  end,
+})
+
+-- [[ Auto-reload Buffers ]]
+-- Automatically reload buffers when files change externally (e.g., after git pull, fg)
+local autoreload_group = vim.api.nvim_create_augroup('auto-reload-buffers', { clear = true })
+
+-- Check for external changes when gaining focus or entering a buffer
+vim.api.nvim_create_autocmd({ 'FocusGained', 'BufEnter', 'TermClose' }, {
+  desc = 'Check for file changes on disk',
+  group = autoreload_group,
+  callback = function()
+    -- Don't check in command-line mode
+    if vim.fn.mode() ~= 'c' and vim.o.buftype ~= 'nofile' then
+      vim.cmd 'checktime'
+    end
+  end,
+})
+
+-- Check for external changes when cursor is idle
+vim.api.nvim_create_autocmd({ 'CursorHold', 'CursorHoldI' }, {
+  desc = 'Check for file changes on disk when idle',
+  group = autoreload_group,
+  callback = function()
+    if vim.fn.mode() ~= 'c' and vim.o.buftype ~= 'nofile' then
+      vim.cmd 'checktime'
+    end
+  end,
+})
+
+-- Notify when a file is automatically reloaded
+vim.api.nvim_create_autocmd('FileChangedShellPost', {
+  desc = 'Notify when file is reloaded from disk',
+  group = autoreload_group,
+  callback = function(args)
+    local filename = vim.fn.fnamemodify(args.file, ':t')
+    vim.notify(string.format('"%s" reloaded from disk', filename), vim.log.levels.INFO)
   end,
 })
 
