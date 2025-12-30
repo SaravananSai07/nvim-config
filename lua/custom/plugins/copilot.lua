@@ -6,11 +6,18 @@ return {
 
     vim.g.copilot_no_tab_map = true
 
-    vim.keymap.set('i', '<S-Tab>', 'copilot#Accept("\\<CR>")', {
+    -- Accept full suggestion (changed from <S-Tab> to avoid blink.cmp snippet conflict)
+    vim.keymap.set('i', '<C-y>', 'copilot#Accept("\\<CR>")', {
       expr = true,
       replace_keycodes = false,
       desc = 'Copilot: Accept suggestion',
     })
+
+    -- Partial acceptance - accept just the current line
+    vim.keymap.set('i', '<C-l>', '<Plug>(copilot-accept-line)', { desc = 'Copilot: Accept line' })
+
+    -- Partial acceptance - accept just the next word
+    vim.keymap.set('i', '<M-w>', '<Plug>(copilot-accept-word)', { desc = 'Copilot: Accept word' })
 
     vim.keymap.set('i', '<M-]>', '<Plug>(copilot-next)', { desc = 'Copilot: Next suggestion' })
     vim.keymap.set('i', '<M-[>', '<Plug>(copilot-previous)', { desc = 'Copilot: Previous suggestion' })

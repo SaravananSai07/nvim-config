@@ -421,7 +421,7 @@ require('lazy').setup({
         { '<leader>s', group = '[S]earch' },
         { '<leader>t', group = '[T]oggle' },
         { '<leader>h', group = 'Git [H]unk', mode = { 'n', 'v' } },
-        { '<leader>q', group = 'Cursor [A]gent' },
+        { '<leader>c', group = '[C]ursor Agent' },
       },
     },
   },

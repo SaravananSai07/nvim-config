@@ -3,15 +3,12 @@ local ui = require('custom.cursor_chat.ui')
 local history = require('custom.cursor_chat.history')
 local context = require('custom.cursor_chat.context')
 
--- Available models (based on cursor-agent CLI)
+-- Available models (based on cursor-agent CLI --help)
 M.models = {
-  { name = 'Auto (Best Available)', value = 'auto' },
-  { name = 'Claude Sonnet 4.5', value = 'sonnet-4.5' },
-  { name = 'Claude Sonnet 4.5 (Thinking)', value = 'sonnet-4.5-thinking' },
-  { name = 'Claude Opus 4.1', value = 'opus-4.1' },
+  { name = 'Claude Sonnet 4 (Thinking)', value = 'sonnet-4-thinking' },
+  { name = 'Claude Sonnet 4', value = 'sonnet-4' },
   { name = 'GPT-5', value = 'gpt-5' },
-  { name = 'Cheetah', value = 'cheetah' },
-  { name = 'Grok', value = 'grok' },
+  { name = 'Auto', value = 'auto' },
 }
 
 -- State management
@@ -22,8 +19,9 @@ M.state = {
   original_winnr = nil,
   changes = {}, -- Stack of applied changes for undo
   current_file = nil,
-  current_model = 'sonnet-4.5', -- Default model
+  current_model = 'sonnet-4-thinking', -- Default to thinking model
   streaming_job = nil, -- Job ID for streaming responses
+  is_authenticated = nil, -- Cache auth status
 }
 
 -- Utility: Check if cursor-agent CLI is available
@@ -37,6 +35,27 @@ local function check_cursor_agent()
     end
   end
   vim.notify('cursor-agent CLI not found. Please install it first:\ncurl https://cursor.com/install -fsSL | bash', vim.log.levels.ERROR)
+  return false
+end
+
+-- Utility: Check if cursor-agent is authenticated
+local function check_auth()
+  if M.state.is_authenticated ~= nil then
+    return M.state.is_authenticated
+  end
+  
+  local handle = io.popen 'cursor-agent status 2>&1'
+  if handle then
+    local result = handle:read '*a'
+    handle:close()
+    if result and result:match('Not logged in') then
+      M.state.is_authenticated = false
+      vim.notify('cursor-agent not authenticated. Run: cursor-agent login', vim.log.levels.WARN)
+      return false
+    end
+    M.state.is_authenticated = true
+    return true
+  end
   return false
 end
 
@@ -85,20 +104,30 @@ local function run_cursor_agent(cmd, args)
 end
 
 -- Utility: Run cursor-agent with streaming support
-local function run_cursor_agent_streaming(prompt, model, on_chunk)
+-- callbacks: { on_thinking = fn, on_text = fn, on_tool = fn, on_complete = fn, on_error = fn }
+local function run_cursor_agent_streaming(prompt, model, callbacks)
   if not check_cursor_agent() then
     return
   end
+  
+  if not check_auth() then
+    return
+  end
 
-  -- Build command with streaming options
+  -- Build command as array (proper way for jobstart)
   local selected_model = model or M.state.current_model
-  local cmd = string.format(
-    'cursor-agent agent --print --output-format stream-json --stream-partial-output --model %s %s',
-    selected_model,
-    vim.fn.shellescape(prompt)
-  )
+  local cmd = {
+    'cursor-agent',
+    '--print',
+    '--output-format', 'stream-json',
+    '--stream-partial-output',
+    '--model', selected_model,
+    prompt
+  }
 
   local has_received_data = false
+  local accumulated_text = ''
+  local is_thinking = false
 
   -- Kill any existing streaming job
   if M.state.streaming_job then
@@ -106,11 +135,14 @@ local function run_cursor_agent_streaming(prompt, model, on_chunk)
     M.state.streaming_job = nil
   end
 
+  -- Show model being used
+  vim.schedule(function()
+    vim.notify(string.format('🤖 Starting %s...', selected_model), vim.log.levels.INFO)
+  end)
+
   -- Start streaming job
-  vim.notify('Starting cursor-agent job with command: ' .. cmd, vim.log.levels.INFO)
   M.state.streaming_job = vim.fn.jobstart(cmd, {
     on_stdout = function(_, data, _)
-      vim.notify('Received stdout data: ' .. vim.inspect(data), vim.log.levels.INFO)
       for _, line in ipairs(data) do
         if line ~= '' then
           has_received_data = true
@@ -118,68 +150,135 @@ local function run_cursor_agent_streaming(prompt, model, on_chunk)
           -- Parse JSON chunks
           local ok, parsed = pcall(vim.json.decode, line)
           if ok and parsed then
-            -- Handle different message types
-            if parsed.type == 'assistant' and parsed.message then
-              -- Extract text from assistant messages
+            -- Handle different message types from cursor-agent stream-json
+            
+            -- Thinking content
+            if parsed.type == 'thinking' then
+              if not is_thinking then
+                is_thinking = true
+                vim.schedule(function()
+                  ui.start_thinking()
+                end)
+              end
+              local thinking_content = parsed.content or parsed.text or ''
+              if thinking_content ~= '' then
+                vim.schedule(function()
+                  callbacks.on_thinking(thinking_content)
+                end)
+              end
+              
+            -- Text/assistant response
+            elseif parsed.type == 'text' or parsed.type == 'content' then
+              if is_thinking then
+                is_thinking = false
+                vim.schedule(function()
+                  ui.end_thinking()
+                end)
+              end
+              local text_content = parsed.content or parsed.text or ''
+              if text_content ~= '' then
+                accumulated_text = accumulated_text .. text_content
+                vim.schedule(function()
+                  callbacks.on_text(text_content)
+                end)
+              end
+              
+            -- Assistant message with nested content
+            elseif parsed.type == 'assistant' and parsed.message then
               local content = parsed.message.content
               if content then
                 for _, item in ipairs(content) do
-                  if item.type == 'text' and item.text then
-                    on_chunk(item.text)
+                  -- Extract content from either field (API may use either)
+                  local item_content = item.content or item.text or ''
+                  
+                  if item.type == 'thinking' then
+                    if not is_thinking then
+                      is_thinking = true
+                      vim.schedule(function()
+                        ui.start_thinking()
+                      end)
+                    end
+                    if item_content ~= '' then
+                      vim.schedule(function()
+                        callbacks.on_thinking(item_content)
+                      end)
+                    end
+                  elseif item.type == 'text' then
+                    if is_thinking then
+                      is_thinking = false
+                      vim.schedule(function()
+                        ui.end_thinking()
+                      end)
+                    end
+                    if item_content ~= '' then
+                      accumulated_text = accumulated_text .. item_content
+                      vim.schedule(function()
+                        callbacks.on_text(item_content)
+                      end)
+                    end
                   end
                 end
               end
-            elseif parsed.type == 'thinking' then
-              ui.set_thinking(true)
+              
+            -- Tool calls (file reads, commands, etc.)
+            elseif parsed.type == 'tool_call' or parsed.type == 'tool_use' then
+              vim.schedule(function()
+                if callbacks.on_tool then
+                  callbacks.on_tool(parsed)
+                end
+                -- Show tool use in UI
+                local tool_name = parsed.name or parsed.tool or 'tool'
+                ui.append_tool_use(tool_name, parsed)
+              end)
+              
+            -- System init message
             elseif parsed.type == 'system' and parsed.subtype == 'init' then
-              -- Show which model is being used
               if parsed.model then
                 vim.schedule(function()
-                  vim.notify(string.format('🤖 Using model: %s', parsed.model), vim.log.levels.INFO)
+                  vim.notify(string.format('🤖 Model: %s', parsed.model), vim.log.levels.INFO)
                 end)
               end
-            elseif parsed.type == 'result' then
-              -- Final result message
-              if parsed.result then
-                -- Already accumulated, just notify completion
-                vim.schedule(function()
-                  vim.notify('✅ Response complete!', vim.log.levels.INFO)
-                end)
-              end
-            end
-          else
-            -- If JSON parsing fails, maybe it's plain text - show it anyway
-            if not line:match('^%s*$') then
+              
+            -- Result/completion message
+            elseif parsed.type == 'result' or parsed.type == 'done' then
               vim.schedule(function()
-                -- Don't spam with debug messages
-                -- vim.notify('Raw output: ' .. line:sub(1, 100), vim.log.levels.DEBUG)
+                if callbacks.on_complete then
+                  callbacks.on_complete(accumulated_text)
+                end
               end)
             end
+          else
+            -- JSON parse failed - might be partial line, buffer it
+            -- For now, just skip malformed lines
           end
         end
       end
     end,
     on_stderr = function(_, data, _)
-      vim.notify('Received stderr data: ' .. vim.inspect(data), vim.log.levels.ERROR)
       for _, line in ipairs(data) do
-        if line ~= '' then
+        if line ~= '' and not line:match('^%s*$') then
           vim.schedule(function()
-            -- TODO: Show errors in the UI
-            vim.notify('Cursor Agent Error: ' .. line, vim.log.levels.ERROR)
+            if callbacks.on_error then
+              callbacks.on_error(line)
+            end
+            -- Don't spam notifications for every stderr line
+            if line:match('error') or line:match('Error') then
+              vim.notify('Cursor Agent: ' .. line, vim.log.levels.ERROR)
+            end
           end)
         end
       end
     end,
     on_exit = function(_, exit_code, _)
-      vim.notify('Job exited with code: ' .. tostring(exit_code), vim.log.levels.INFO)
       M.state.streaming_job = nil
-      ui.set_thinking(false)
       vim.schedule(function()
+        ui.end_thinking()
         if exit_code == 0 then
           if not has_received_data then
-            vim.notify('⚠️  No response received - check model availability', vim.log.levels.WARN)
+            vim.notify('⚠️  No response received - check authentication with: cursor-agent status', vim.log.levels.WARN)
+          else
+            vim.notify('✅ Response complete', vim.log.levels.INFO)
           end
-          -- Success notification is already shown in the result handler
         else
           vim.notify(string.format('❌ Agent exited with code %d', exit_code), vim.log.levels.ERROR)
         end
@@ -187,9 +286,10 @@ local function run_cursor_agent_streaming(prompt, model, on_chunk)
     end,
   })
 
-  if M.state.streaming_job > 0 then
-    vim.fn.chansend(M.state.streaming_job, prompt)
-    vim.fn.chanclose(M.state.streaming_job, 'stdin')
+  -- Note: Do NOT use chansend - the prompt is already passed as argument to cmd
+  if M.state.streaming_job <= 0 then
+    vim.notify('Failed to start cursor-agent job', vim.log.levels.ERROR)
+    M.state.streaming_job = nil
   end
 end
 
@@ -228,12 +328,37 @@ local function get_current_model_name()
 end
 
 function M.submit_prompt(prompt)
-  local full_prompt = context.get_context() .. prompt
-  context.clear_context()
+  -- Parse @file mentions from prompt and add to context
+  local files_to_add, clean_prompt = context.parse_mentions(prompt)
+  for _, filepath in ipairs(files_to_add) do
+    context.add_file(filepath)
+  end
+  
+  local full_prompt = context.get_context() .. clean_prompt
+  
+  -- Add user message to history
+  ui.update_history('**You:**\n\n' .. prompt)
+  
+  -- Add assistant header
+  ui.update_history('\n**Assistant:**\n')
 
-  run_cursor_agent_streaming(full_prompt, M.state.current_model, function(chunk)
-    ui.append_to_history(chunk)
-  end)
+  run_cursor_agent_streaming(full_prompt, M.state.current_model, {
+    on_thinking = function(chunk)
+      ui.append_thinking(chunk)
+    end,
+    on_text = function(chunk)
+      ui.append_to_history(chunk)
+    end,
+    on_tool = function(tool_data)
+      -- Tool use is handled in run_cursor_agent_streaming
+    end,
+    on_complete = function(full_response)
+      context.clear_context()
+    end,
+    on_error = function(error_msg)
+      ui.append_to_history('\n\n⚠️ Error: ' .. error_msg)
+    end,
+  })
 end
 
 -- Chat command: Interactive chat with cursor-agent
@@ -247,6 +372,17 @@ end
 function M.chat_visual()
   context.add_selection()
   ui.create_chat_window()
+end
+
+-- Add file to context via telescope
+function M.add_file_picker()
+  context.pick_file_to_add()
+end
+
+-- Clear context
+function M.clear_context()
+  context.clear_context()
+  vim.notify('Context cleared', vim.log.levels.INFO)
 end
 
 function M.apply()
@@ -295,7 +431,7 @@ function M.show_diff_view(ai_response, ctx)
 
   -- If no code blocks found, show the response in a float and return
   if #code_lines == 0 then
-    create_float_window(ai_response)
+    ui.show_context(ai_response)
     vim.notify('No code changes detected in response. Showing full response instead.', vim.log.levels.WARN)
     return
   end
@@ -327,7 +463,7 @@ function M.show_diff_view(ai_response, ctx)
   -- Set up keymaps for diff navigation
   M.setup_diff_keymaps(diff_buf)
 
-  vim.notify('Diff view ready. Use [q/]q to navigate, <leader>qa/qr to accept/reject chunks', vim.log.levels.INFO)
+  vim.notify('Diff view ready. Use ]c/[c to navigate, <leader>ca/cr to accept/reject chunks', vim.log.levels.INFO)
 end
 
 -- Set up keymaps for diff view
@@ -335,40 +471,35 @@ function M.setup_diff_keymaps(bufnr)
   local opts = { buffer = bufnr, noremap = true, silent = true }
 
   -- Navigate between changes
-  vim.keymap.set('n', ']q', ']c', vim.tbl_extend('force', opts, { desc = 'Next diff chunk' }))
-  vim.keymap.set('n', '[q', '[c', vim.tbl_extend('force', opts, { desc = 'Previous diff chunk' }))
+  vim.keymap.set('n', ']c', ']c', vim.tbl_extend('force', opts, { desc = 'Next diff chunk' }))
+  vim.keymap.set('n', '[c', '[c', vim.tbl_extend('force', opts, { desc = 'Previous diff chunk' }))
 
   -- Accept current chunk
-  vim.keymap.set('n', '<leader>qa', function()
+  vim.keymap.set('n', '<leader>ca', function()
     M.accept_chunk()
   end, vim.tbl_extend('force', opts, { desc = 'Accept current chunk' }))
 
   -- Reject current chunk (do nothing, just move to next)
-  vim.keymap.set('n', '<leader>qr', function()
+  vim.keymap.set('n', '<leader>cr', function()
     vim.cmd 'normal! ]c'
     vim.notify('Chunk rejected (skipped)', vim.log.levels.INFO)
   end, vim.tbl_extend('force', opts, { desc = 'Reject current chunk' }))
 
   -- Accept all chunks
-  vim.keymap.set('n', '<leader>qA', function()
+  vim.keymap.set('n', '<leader>cA', function()
     M.accept_all()
   end, vim.tbl_extend('force', opts, { desc = 'Accept all chunks' }))
 
   -- Reject all chunks (close diff)
-  vim.keymap.set('n', '<leader>qR', function()
+  vim.keymap.set('n', '<leader>cR', function()
     M.close_diff()
     vim.notify('All changes rejected', vim.log.levels.INFO)
   end, vim.tbl_extend('force', opts, { desc = 'Reject all chunks' }))
 
   -- Undo last acceptance
-  vim.keymap.set('n', '<leader>qu', function()
+  vim.keymap.set('n', '<leader>cu', function()
     M.undo_last()
   end, vim.tbl_extend('force', opts, { desc = 'Undo last acceptance' }))
-
-  -- Undo all acceptances
-  vim.keymap.set('n', '<leader>qU', function()
-    M.undo_all()
-  end, vim.tbl_extend('force', opts, { desc = 'Undo all acceptances' }))
 
   -- Close diff view
   vim.keymap.set('n', 'q', function()
@@ -503,11 +634,38 @@ function M.setup()
   end, { nargs = '?', desc = 'Apply changes with Cursor Agent' })
 
   vim.api.nvim_create_user_command('CursorNewChat', function()
+    -- Check if chat window exists and buffer is valid
+    if not ui.state.history_buf or not vim.api.nvim_buf_is_valid(ui.state.history_buf) then
+      -- No existing chat, just open a new one
+      M.chat()
+      return
+    end
+    
+    -- Save existing chat before clearing
     history.save_chat(ui.state.history_buf)
-    -- Clear the history buffer
+    
+    -- Clear the history buffer and add welcome message
     vim.api.nvim_buf_set_option(ui.state.history_buf, 'modifiable', true)
-    vim.api.nvim_buf_set_lines(ui.state.history_buf, 0, -1, false, { '# New Chat', '', '**Welcome to Cursor Chat!**' })
+    vim.api.nvim_buf_set_lines(ui.state.history_buf, 0, -1, false, {
+      '# Cursor Agent Chat',
+      '',
+      'Type your message below and press **Enter** to send.',
+      '',
+      '**Tips:**',
+      '- Use `@file:path/to/file` to add files to context',
+      '- `<leader>cf` to pick files with telescope',
+      '- `<leader>cm` to change model',
+      '- `<leader>cv` to view current context',
+      '',
+      '---',
+      '',
+    })
     vim.api.nvim_buf_set_option(ui.state.history_buf, 'modifiable', false)
+    
+    -- Clear context for new chat
+    context.clear_context()
+    
+    vim.notify('Started new chat (previous chat saved)', vim.log.levels.INFO)
   end, { desc = 'Start a new chat' })
 
   vim.api.nvim_create_user_command('CursorOpenChat', function()
@@ -524,7 +682,11 @@ function M.setup()
   end, { desc = 'Open a previous chat' })
 
   vim.api.nvim_create_user_command('CursorAddFile', function(opts)
-    context.add_file(opts.fargs[1] or vim.api.nvim_buf_get_name(0))
+    if opts.fargs[1] then
+      context.add_file(opts.fargs[1])
+    else
+      context.pick_file_to_add()
+    end
   end, { nargs = '?', complete = 'file', desc = 'Add a file to the chat context' })
   
   vim.api.nvim_create_user_command('CursorAddSelection', function()
@@ -535,38 +697,53 @@ function M.setup()
     ui.show_context(context.get_context())
   end, { desc = 'Show the current chat context' })
 
+  vim.api.nvim_create_user_command('CursorClearContext', function()
+    M.clear_context()
+  end, { desc = 'Clear the chat context' })
+
   vim.api.nvim_create_user_command('CursorModel', function()
     show_model_selector()
   end, { desc = 'Select Cursor Agent model' })
 
-  -- Global keymaps
-  vim.keymap.set('n', '<leader>qc', function()
+  -- Global keymaps (using <leader>c for Cursor)
+  vim.keymap.set('n', '<leader>cc', function()
     M.chat()
-  end, { desc = 'Cursor: Chat' })
+  end, { desc = 'Cursor: Open Chat' })
 
-  vim.keymap.set('v', '<leader>qc', function()
+  vim.keymap.set('v', '<leader>cc', function()
     M.chat_visual()
   end, { desc = 'Cursor: Chat with selection' })
 
-  vim.keymap.set('n', '<leader>qa', function()
-    M.apply()
-  end, { desc = 'Cursor: Apply changes' })
+  vim.keymap.set('n', '<leader>cf', function()
+    M.add_file_picker()
+  end, { desc = 'Cursor: Add file to context' })
 
-  vim.keymap.set('n', '<leader>qs', function()
+  vim.keymap.set('v', '<leader>cs', function()
+    context.add_selection()
+    vim.notify('Selection added to context', vim.log.levels.INFO)
+  end, { desc = 'Cursor: Add selection to context' })
+
+  vim.keymap.set('n', '<leader>cx', function()
+    M.clear_context()
+  end, { desc = 'Cursor: Clear context' })
+
+  vim.keymap.set('n', '<leader>cv', function()
     ui.show_context(context.get_context())
-  end, { desc = 'Cursor: Show context' })
+  end, { desc = 'Cursor: View context' })
 
-  vim.keymap.set('n', '<leader>qm', function()
+  vim.keymap.set('n', '<leader>cm', function()
     show_model_selector()
   end, { desc = 'Cursor: Select model' })
 
-  -- Check if cursor-agent is installed
+  -- Check if cursor-agent is installed and authenticated
   vim.defer_fn(function()
     if not check_cursor_agent() then
       vim.notify(
         'cursor-agent CLI not found. Install it with:\ncurl https://cursor.com/install -fsSL | bash\n\nThen authenticate with: cursor-agent login',
         vim.log.levels.WARN
       )
+    else
+      check_auth()
     end
   end, 1000)
 end
