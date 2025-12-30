@@ -385,30 +385,45 @@ function M.clear_context()
   vim.notify('Context cleared', vim.log.levels.INFO)
 end
 
-function M.apply()
+function M.apply(prompt_arg)
+  -- If prompt provided as argument, use it directly
+  if prompt_arg and prompt_arg ~= '' then
+    M._do_apply(prompt_arg)
+    return
+  end
+  
+  -- Otherwise, prompt for input
   vim.ui.input({ prompt = 'Prompt for changes:' }, function(prompt)
     if not prompt or prompt == '' then
       return
     end
-
-    local ctx = get_file_context()
-    if not ctx.filepath or ctx.filepath == '' then
-      vim.notify('No file open', vim.log.levels.WARN)
-      return
-    end
-
-    M.state.original_bufnr = ctx.bufnr
-    M.state.original_winnr = vim.api.nvim_get_current_win()
-    M.state.current_file = ctx.filepath
-
-    local full_prompt = string.format('Apply the following changes to the code:\n%s\n\nFile: %s\n```\n%s\n```', prompt, ctx.filepath, ctx.content)
-    
-    local result = run_cursor_agent('chat', string.format('"%s"', vim.fn.shellescape(full_prompt)))
-
-    if result then
-      M.show_diff_view(result, ctx)
-    end
+    M._do_apply(prompt)
   end)
+end
+
+-- Internal function to perform the apply operation
+function M._do_apply(prompt)
+  if not prompt or prompt == '' then
+    return
+  end
+
+  local ctx = get_file_context()
+  if not ctx.filepath or ctx.filepath == '' then
+    vim.notify('No file open', vim.log.levels.WARN)
+    return
+  end
+
+  M.state.original_bufnr = ctx.bufnr
+  M.state.original_winnr = vim.api.nvim_get_current_win()
+  M.state.current_file = ctx.filepath
+
+  local full_prompt = string.format('Apply the following changes to the code:\n%s\n\nFile: %s\n```\n%s\n```', prompt, ctx.filepath, ctx.content)
+  
+  local result = run_cursor_agent('chat', string.format('"%s"', vim.fn.shellescape(full_prompt)))
+
+  if result then
+    M.show_diff_view(result, ctx)
+  end
 end
 
 -- Show diff view with proposed changes
@@ -470,9 +485,7 @@ end
 function M.setup_diff_keymaps(bufnr)
   local opts = { buffer = bufnr, noremap = true, silent = true }
 
-  -- Navigate between changes
-  vim.keymap.set('n', ']c', ']c', vim.tbl_extend('force', opts, { desc = 'Next diff chunk' }))
-  vim.keymap.set('n', '[c', '[c', vim.tbl_extend('force', opts, { desc = 'Previous diff chunk' }))
+  -- Note: ]c and [c are built-in vim diff navigation commands, no need to remap
 
   -- Accept current chunk
   vim.keymap.set('n', '<leader>ca', function()
@@ -500,6 +513,11 @@ function M.setup_diff_keymaps(bufnr)
   vim.keymap.set('n', '<leader>cu', function()
     M.undo_last()
   end, vim.tbl_extend('force', opts, { desc = 'Undo last acceptance' }))
+
+  -- Undo all acceptances
+  vim.keymap.set('n', '<leader>cU', function()
+    M.undo_all()
+  end, vim.tbl_extend('force', opts, { desc = 'Undo all acceptances' }))
 
   -- Close diff view
   vim.keymap.set('n', 'q', function()

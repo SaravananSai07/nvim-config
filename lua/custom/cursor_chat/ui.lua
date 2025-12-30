@@ -28,10 +28,18 @@ local function setup_highlights()
 end
 
 function M.create_chat_window()
-  if M.state.win and vim.api.nvim_win_is_valid(M.state.win) then
+  -- Check if both windows are valid before reusing them
+  local win_valid = M.state.win and vim.api.nvim_win_is_valid(M.state.win)
+  local input_win_valid = M.state.input_win and vim.api.nvim_win_is_valid(M.state.input_win)
+
+  if win_valid and input_win_valid then
+    -- Both windows exist, just focus the input window
     vim.api.nvim_set_current_win(M.state.input_win)
     vim.cmd('startinsert')
     return
+  elseif win_valid or input_win_valid then
+    -- Partial state - close any remaining windows and recreate
+    M.close_chat()
   end
 
   -- Setup highlight groups

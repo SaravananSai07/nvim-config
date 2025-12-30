@@ -154,11 +154,10 @@ return {
         callback = function()
           local bufname = vim.api.nvim_buf_get_name(0)
           if bufname:match('Cursor Input') then
-            -- COMPLETELY disable render-markdown for chat window to prevent invisible text
+            -- Disable render-markdown for chat input to prevent invisible text
             vim.cmd('RenderMarkdown disable')
             vim.wo.conceallevel = 0
             vim.wo.concealcursor = ''
-            vim.notify('📝 Chat window ready (markdown rendering disabled for clarity)', vim.log.levels.DEBUG)
           elseif vim.bo.filetype == 'markdown' then
             -- For regular markdown files, use full rendering
             vim.cmd('RenderMarkdown enable')

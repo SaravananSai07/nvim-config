@@ -234,9 +234,17 @@ vim.api.nvim_create_autocmd('SwapExists', {
   desc = 'Intelligently handle swap files',
   group = vim.api.nvim_create_augroup('smart-swap-handling', { clear = true }),
   callback = function(args)
-    local swap_file = vim.fn.swapname()
+    -- Use vim.v.swapname to get the existing swap file path (not vim.fn.swapname())
+    local swap_file = vim.v.swapname
     local file_time = vim.fn.getftime(args.file)
     local swap_time = vim.fn.getftime(swap_file)
+
+    -- getftime returns -1 on error - fall back to showing recovery dialog (safest choice)
+    if file_time == -1 or swap_time == -1 then
+      vim.v.swapchoice = ''
+      return
+    end
+
     local time_diff = file_time - swap_time
 
     -- Auto-delete stale swap files
@@ -256,6 +264,74 @@ vim.api.nvim_create_autocmd('SwapExists', {
       vim.v.swapchoice = 'd'
       vim.notify('Deleted stale swap file', vim.log.levels.INFO)
     end
+  end,
+})
+
+-- [[ W325 Swap File Recovery ]]
+-- Handle the case where Neovim shows W325 (ignoring swapfile from another Nvim process)
+-- and fails to load the file content properly. Since another Neovim has the file open,
+-- we load content for viewing but keep the buffer readonly to prevent conflicts.
+vim.api.nvim_create_autocmd('BufReadPost', {
+  desc = 'Force reload if buffer is empty due to W325 swap file warning',
+  group = vim.api.nvim_create_augroup('w325-swap-recovery', { clear = true }),
+  callback = function(args)
+    -- Schedule to run after buffer setup is complete
+    vim.schedule(function()
+      local bufnr = args.buf
+      -- Check if buffer still exists
+      if not vim.api.nvim_buf_is_valid(bufnr) then
+        return
+      end
+
+      -- Prevent infinite recursion: check if we've already attempted recovery
+      local recovery_attempted = vim.b[bufnr].w325_recovery_attempted
+      if recovery_attempted then
+        return
+      end
+
+      local filename = args.file
+      -- Skip if no filename (scratch buffer)
+      if filename == '' then
+        return
+      end
+
+      -- Check conditions: buffer is empty, read-only, but file on disk has content
+      local line_count = vim.api.nvim_buf_line_count(bufnr)
+      -- Use nvim_buf_get_option for reliable access to non-current buffer options
+      local is_readonly = vim.api.nvim_buf_get_option(bufnr, 'readonly')
+      local first_line = vim.api.nvim_buf_get_lines(bufnr, 0, 1, false)[1] or ''
+
+      -- Buffer appears empty (1 line with no content)
+      if line_count == 1 and first_line == '' and is_readonly then
+        -- Check if file on disk actually has content
+        -- getfsize returns -1 on error, 0 for empty file
+        local file_size = vim.fn.getfsize(filename)
+        if file_size > 0 then
+          -- Mark that we've attempted recovery to prevent infinite loop
+          vim.b[bufnr].w325_recovery_attempted = true
+
+          -- Read file content directly from disk (buffer-based approach)
+          local content = vim.fn.readfile(filename)
+          if content and #content > 0 then
+            -- Temporarily enable modification to populate content
+            vim.api.nvim_buf_set_option(bufnr, 'modifiable', true)
+            vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, content)
+            vim.api.nvim_buf_set_option(bufnr, 'modified', false)
+
+            -- Restore readonly state - keep buffer protected since another process may have it open
+            vim.api.nvim_buf_set_option(bufnr, 'modifiable', false)
+            vim.api.nvim_buf_set_option(bufnr, 'readonly', true)
+
+            -- Trigger filetype detection for syntax highlighting
+            vim.api.nvim_buf_call(bufnr, function()
+              vim.cmd('filetype detect')
+            end)
+
+            vim.notify('Loaded file (readonly - another Nvim may have it open)', vim.log.levels.WARN)
+          end
+        end
+      end
+    end)
   end,
 })
 
