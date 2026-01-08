@@ -3,11 +3,17 @@ local ui = require('custom.cursor_chat.ui')
 local history = require('custom.cursor_chat.history')
 local context = require('custom.cursor_chat.context')
 
--- Available models (based on cursor-agent CLI --help)
+-- Available models (from cursor-agent CLI)
 M.models = {
-  { name = 'Claude Sonnet 4 (Thinking)', value = 'sonnet-4-thinking' },
-  { name = 'Claude Sonnet 4', value = 'sonnet-4' },
-  { name = 'GPT-5', value = 'gpt-5' },
+  { name = 'Claude Sonnet 4.5 (Thinking)', value = 'sonnet-4.5-thinking' },
+  { name = 'Claude Sonnet 4.5', value = 'sonnet-4.5' },
+  { name = 'Claude Opus 4.5 (Thinking)', value = 'opus-4.5-thinking' },
+  { name = 'Claude Opus 4.5', value = 'opus-4.5' },
+  { name = 'Claude Opus 4.1', value = 'opus-4.1' },
+  { name = 'GPT-5.2', value = 'gpt-5.2' },
+  { name = 'GPT-5.1 Codex', value = 'gpt-5.1-codex' },
+  { name = 'Gemini 3 Pro', value = 'gemini-3-pro' },
+  { name = 'Grok', value = 'grok' },
   { name = 'Auto', value = 'auto' },
 }
 
@@ -19,44 +25,68 @@ M.state = {
   original_winnr = nil,
   changes = {}, -- Stack of applied changes for undo
   current_file = nil,
-  current_model = 'sonnet-4-thinking', -- Default to thinking model
+  current_model = 'sonnet-4.5-thinking', -- Default to thinking model
   streaming_job = nil, -- Job ID for streaming responses
   is_authenticated = nil, -- Cache auth status
 }
 
 -- Utility: Check if cursor-agent CLI is available
 local function check_cursor_agent()
-  local handle = io.popen 'which cursor-agent 2>/dev/null'
-  if handle then
-    local result = handle:read '*a'
-    handle:close()
-    if result and result ~= '' then
-      return true
-    end
+  -- Use vim.fn.executable instead of io.popen - it's much faster and doesn't block
+  if vim.fn.executable('cursor-agent') == 1 then
+    return true
   end
   vim.notify('cursor-agent CLI not found. Please install it first:\ncurl https://cursor.com/install -fsSL | bash', vim.log.levels.ERROR)
   return false
 end
 
--- Utility: Check if cursor-agent is authenticated
+-- Utility: Check if cursor-agent is authenticated (async version for startup)
+local function check_auth_async(callback)
+  vim.fn.jobstart({ 'cursor-agent', 'status' }, {
+    env = {
+      CURSOR_AGENT = vim.NIL,
+      CURSOR_CLI = vim.NIL,
+      CURSOR_SANDBOX = vim.NIL,
+    },
+    stdout_buffered = true,
+    on_stdout = function(_, data)
+      local output = table.concat(data or {}, '\n')
+      if output:match('Not logged in') then
+        M.state.is_authenticated = false
+        if callback then callback(false) end
+      else
+        M.state.is_authenticated = true
+        if callback then callback(true) end
+      end
+    end,
+    on_exit = function(_, code)
+      if code ~= 0 and M.state.is_authenticated == nil then
+        M.state.is_authenticated = false
+        if callback then callback(false) end
+      end
+    end,
+  })
+end
+
+-- Utility: Check if cursor-agent is authenticated (sync version, returns cached if available)
 local function check_auth()
+  -- If we have a cached result, use it
   if M.state.is_authenticated ~= nil then
     return M.state.is_authenticated
   end
   
-  local handle = io.popen 'cursor-agent status 2>&1'
-  if handle then
-    local result = handle:read '*a'
-    handle:close()
-    if result and result:match('Not logged in') then
-      M.state.is_authenticated = false
-      vim.notify('cursor-agent not authenticated. Run: cursor-agent login', vim.log.levels.WARN)
-      return false
+  -- No cached result - show warning and trigger async check
+  vim.notify('⏳ Checking authentication...', vim.log.levels.INFO)
+  check_auth_async(function(is_auth)
+    if not is_auth then
+      vim.schedule(function()
+        vim.notify('❌ cursor-agent not authenticated.\nRun in a separate terminal: cursor-agent login', vim.log.levels.ERROR)
+      end)
     end
-    M.state.is_authenticated = true
-    return true
-  end
-  return false
+  end)
+  
+  -- Assume authenticated for now (will be updated async)
+  return true
 end
 
 -- Utility: Get file context
@@ -114,7 +144,9 @@ local function run_cursor_agent_streaming(prompt, model, callbacks)
     return
   end
 
-  -- Build command as array (proper way for jobstart)
+  -- Build command as array
+  -- IMPORTANT: Global options (--print, --model, etc.) come BEFORE 'agent' subcommand
+  -- The prompt comes AFTER 'agent' subcommand
   local selected_model = model or M.state.current_model
   local cmd = {
     'cursor-agent',
@@ -122,12 +154,15 @@ local function run_cursor_agent_streaming(prompt, model, callbacks)
     '--output-format', 'stream-json',
     '--stream-partial-output',
     '--model', selected_model,
+    'agent',  -- Subcommand comes after global options
+    '--',     -- Separator to ensure prompt isn't parsed as flag
     prompt
   }
 
   local has_received_data = false
   local accumulated_text = ''
   local is_thinking = false
+  local stdout_buffer = ''  -- Buffer for incomplete JSON lines
 
   -- Kill any existing streaming job
   if M.state.streaming_job then
@@ -140,117 +175,136 @@ local function run_cursor_agent_streaming(prompt, model, callbacks)
     vim.notify(string.format('🤖 Starting %s...', selected_model), vim.log.levels.INFO)
   end)
 
-  -- Start streaming job
-  M.state.streaming_job = vim.fn.jobstart(cmd, {
-    on_stdout = function(_, data, _)
-      for _, line in ipairs(data) do
-        if line ~= '' then
-          has_received_data = true
-          
-          -- Parse JSON chunks
-          local ok, parsed = pcall(vim.json.decode, line)
-          if ok and parsed then
-            -- Handle different message types from cursor-agent stream-json
-            
-            -- Thinking content
-            if parsed.type == 'thinking' then
-              if not is_thinking then
-                is_thinking = true
-                vim.schedule(function()
-                  ui.start_thinking()
-                end)
-              end
-              local thinking_content = parsed.content or parsed.text or ''
-              if thinking_content ~= '' then
-                vim.schedule(function()
-                  callbacks.on_thinking(thinking_content)
-                end)
-              end
-              
-            -- Text/assistant response
-            elseif parsed.type == 'text' or parsed.type == 'content' then
-              if is_thinking then
-                is_thinking = false
-                vim.schedule(function()
-                  ui.end_thinking()
-                end)
-              end
-              local text_content = parsed.content or parsed.text or ''
-              if text_content ~= '' then
-                accumulated_text = accumulated_text .. text_content
-                vim.schedule(function()
-                  callbacks.on_text(text_content)
-                end)
-              end
-              
-            -- Assistant message with nested content
-            elseif parsed.type == 'assistant' and parsed.message then
-              local content = parsed.message.content
-              if content then
-                for _, item in ipairs(content) do
-                  -- Extract content from either field (API may use either)
-                  local item_content = item.content or item.text or ''
-                  
-                  if item.type == 'thinking' then
-                    if not is_thinking then
-                      is_thinking = true
-                      vim.schedule(function()
-                        ui.start_thinking()
-                      end)
-                    end
-                    if item_content ~= '' then
-                      vim.schedule(function()
-                        callbacks.on_thinking(item_content)
-                      end)
-                    end
-                  elseif item.type == 'text' then
-                    if is_thinking then
-                      is_thinking = false
-                      vim.schedule(function()
-                        ui.end_thinking()
-                      end)
-                    end
-                    if item_content ~= '' then
-                      accumulated_text = accumulated_text .. item_content
-                      vim.schedule(function()
-                        callbacks.on_text(item_content)
-                      end)
-                    end
-                  end
-                end
-              end
-              
-            -- Tool calls (file reads, commands, etc.)
-            elseif parsed.type == 'tool_call' or parsed.type == 'tool_use' then
+  -- Helper function to process a complete JSON line
+  local function process_json_line(line)
+    if line == '' then return end
+    
+    has_received_data = true
+    
+    local ok, parsed = pcall(vim.json.decode, line)
+    if not ok or not parsed then
+      return
+    end
+    
+    local msg_type = parsed.type
+    
+    -- Thinking content - uses "text" field and has subtype delta/completed
+    if msg_type == 'thinking' then
+      if parsed.subtype == 'delta' then
+        -- Start thinking section if not already
+        if not is_thinking then
+          is_thinking = true
+          vim.schedule(function()
+            ui.start_thinking()
+          end)
+        end
+        -- Thinking uses "text" field, not "content"
+        local thinking_text = parsed.text or ''
+        if thinking_text ~= '' then
+          vim.schedule(function()
+            callbacks.on_thinking(thinking_text)
+          end)
+        end
+      elseif parsed.subtype == 'completed' then
+        -- Thinking finished
+        if is_thinking then
+          is_thinking = false
+          vim.schedule(function()
+            ui.end_thinking()
+          end)
+        end
+      end
+      
+    -- Assistant message - contains the final response in content array
+    elseif msg_type == 'assistant' then
+      local content = parsed.message and parsed.message.content
+      if content and type(content) == 'table' then
+        for _, item in ipairs(content) do
+          -- Assistant text uses "text" field
+          if item.type == 'text' then
+            local text = item.text or ''
+            if text ~= '' then
+              accumulated_text = accumulated_text .. text
               vim.schedule(function()
-                if callbacks.on_tool then
-                  callbacks.on_tool(parsed)
-                end
-                -- Show tool use in UI
-                local tool_name = parsed.name or parsed.tool or 'tool'
-                ui.append_tool_use(tool_name, parsed)
-              end)
-              
-            -- System init message
-            elseif parsed.type == 'system' and parsed.subtype == 'init' then
-              if parsed.model then
-                vim.schedule(function()
-                  vim.notify(string.format('🤖 Model: %s', parsed.model), vim.log.levels.INFO)
-                end)
-              end
-              
-            -- Result/completion message
-            elseif parsed.type == 'result' or parsed.type == 'done' then
-              vim.schedule(function()
-                if callbacks.on_complete then
-                  callbacks.on_complete(accumulated_text)
-                end
+                callbacks.on_text(text)
               end)
             end
-          else
-            -- JSON parse failed - might be partial line, buffer it
-            -- For now, just skip malformed lines
           end
+        end
+      end
+      
+    -- Text delta (for non-thinking models)
+    elseif msg_type == 'text' or msg_type == 'content' then
+      if is_thinking then
+        is_thinking = false
+        vim.schedule(function()
+          ui.end_thinking()
+        end)
+      end
+      local text_content = parsed.text or parsed.content or ''
+      if text_content ~= '' then
+        accumulated_text = accumulated_text .. text_content
+        vim.schedule(function()
+          callbacks.on_text(text_content)
+        end)
+      end
+      
+    -- Tool calls
+    elseif msg_type == 'tool_call' or msg_type == 'tool_use' or msg_type == 'tool_result' then
+      vim.schedule(function()
+        if callbacks.on_tool then
+          callbacks.on_tool(parsed)
+        end
+        local tool_name = parsed.name or parsed.tool or parsed.tool_name or 'tool'
+        ui.append_tool_use(tool_name, parsed)
+      end)
+      
+    -- System init message - shows what model is being used
+    elseif msg_type == 'system' then
+      if parsed.subtype == 'init' and parsed.model then
+        vim.schedule(function()
+          vim.notify(string.format('🤖 Using: %s', parsed.model), vim.log.levels.INFO)
+        end)
+      end
+      
+    -- Result message - indicates completion
+    elseif msg_type == 'result' then
+      vim.schedule(function()
+        if callbacks.on_complete then
+          callbacks.on_complete(accumulated_text)
+        end
+      end)
+      
+    -- User message echo - ignore
+    elseif msg_type == 'user' then
+      -- Ignore user message echo
+    end
+  end
+
+  -- Start streaming job
+  -- Clear Cursor env vars to avoid conflicts when running from Cursor's terminal
+  -- CURSOR_SANDBOX especially blocks access to auth credentials
+  M.state.streaming_job = vim.fn.jobstart(cmd, {
+    env = {
+      CURSOR_AGENT = vim.NIL,   -- Unset this env var
+      CURSOR_CLI = vim.NIL,     -- Unset this env var
+      CURSOR_SANDBOX = vim.NIL, -- Unset sandbox to access credentials
+    },
+    on_stdout = function(_, data, _)
+      -- Neovim job API: data is split by \n, last element is partial (or empty if ended with \n)
+      if #data == 0 then return end
+      
+      -- Prepend any buffered partial line to the first element
+      data[1] = stdout_buffer .. data[1]
+      stdout_buffer = ''
+      
+      -- The last element is potentially incomplete, save it
+      stdout_buffer = data[#data]
+      
+      -- Process all complete lines (everything except the last)
+      for i = 1, #data - 1 do
+        if data[i] ~= '' then
+          process_json_line(data[i])
         end
       end
     end,
@@ -261,8 +315,8 @@ local function run_cursor_agent_streaming(prompt, model, callbacks)
             if callbacks.on_error then
               callbacks.on_error(line)
             end
-            -- Don't spam notifications for every stderr line
-            if line:match('error') or line:match('Error') then
+            -- Only notify on actual errors, not progress messages
+            if line:match('[Ee]rror') or line:match('[Ff]ailed') then
               vim.notify('Cursor Agent: ' .. line, vim.log.levels.ERROR)
             end
           end)
@@ -271,8 +325,17 @@ local function run_cursor_agent_streaming(prompt, model, callbacks)
     end,
     on_exit = function(_, exit_code, _)
       M.state.streaming_job = nil
+      
+      -- Process any remaining buffer content
+      if stdout_buffer ~= '' then
+        process_json_line(stdout_buffer)
+        stdout_buffer = ''
+      end
+      
       vim.schedule(function()
-        ui.end_thinking()
+        if is_thinking then
+          ui.end_thinking()
+        end
         if exit_code == 0 then
           if not has_received_data then
             vim.notify('⚠️  No response received - check authentication with: cursor-agent status', vim.log.levels.WARN)
@@ -286,10 +349,14 @@ local function run_cursor_agent_streaming(prompt, model, callbacks)
     end,
   })
 
-  -- Note: Do NOT use chansend - the prompt is already passed as argument to cmd
   if M.state.streaming_job <= 0 then
     vim.notify('Failed to start cursor-agent job', vim.log.levels.ERROR)
     M.state.streaming_job = nil
+  else
+    -- Debug: show the command being run
+    vim.schedule(function()
+      vim.notify('Running: ' .. table.concat(cmd, ' '), vim.log.levels.DEBUG)
+    end)
   end
 end
 
@@ -723,6 +790,38 @@ function M.setup()
     show_model_selector()
   end, { desc = 'Select Cursor Agent model' })
 
+  vim.api.nvim_create_user_command('CursorStatus', function()
+    -- Reset auth cache and check status asynchronously
+    M.state.is_authenticated = nil
+    vim.notify('⏳ Checking authentication...', vim.log.levels.INFO)
+    check_auth_async(function(is_auth)
+      vim.schedule(function()
+        if is_auth then
+          vim.notify('✅ cursor-agent is authenticated', vim.log.levels.INFO)
+        else
+          vim.notify('❌ cursor-agent not authenticated.\nRun: cursor-agent login', vim.log.levels.ERROR)
+        end
+      end)
+    end)
+  end, { desc = 'Check Cursor Agent authentication status' })
+
+  vim.api.nvim_create_user_command('CursorDebug', function()
+    local info = {
+      'Cursor Agent Debug Info:',
+      '------------------------',
+      'Current model: ' .. M.state.current_model,
+      'Authenticated: ' .. tostring(M.state.is_authenticated),
+      'Active job: ' .. tostring(M.state.streaming_job),
+      'Context items: ' .. tostring(context.count()),
+      '',
+      'Environment (will be cleared for cursor-agent):',
+      '  CURSOR_AGENT: ' .. (os.getenv('CURSOR_AGENT') or 'not set'),
+      '  CURSOR_CLI: ' .. (os.getenv('CURSOR_CLI') or 'not set'),
+      '  CURSOR_SANDBOX: ' .. (os.getenv('CURSOR_SANDBOX') or 'not set'),
+    }
+    vim.notify(table.concat(info, '\n'), vim.log.levels.INFO)
+  end, { desc = 'Show Cursor Agent debug info' })
+
   -- Global keymaps (using <leader>c for Cursor)
   vim.keymap.set('n', '<leader>cc', function()
     M.chat()
@@ -754,6 +853,7 @@ function M.setup()
   end, { desc = 'Cursor: Select model' })
 
   -- Check if cursor-agent is installed and authenticated
+  -- Async startup check - won't block Neovim
   vim.defer_fn(function()
     if not check_cursor_agent() then
       vim.notify(
@@ -761,7 +861,14 @@ function M.setup()
         vim.log.levels.WARN
       )
     else
-      check_auth()
+      -- Use async check to avoid blocking
+      check_auth_async(function(is_auth)
+        if not is_auth then
+          vim.schedule(function()
+            vim.notify('⚠️ cursor-agent not logged in. Run: cursor-agent login', vim.log.levels.WARN)
+          end)
+        end
+      end)
     end
   end, 1000)
 end
