@@ -95,6 +95,7 @@ return {
       ensure_installed = {
         -- Update this to ensure that you have the debuggers for the langs you want
         'delve',
+        'codelldb',
       },
     }
 
@@ -136,12 +137,68 @@ return {
     dap.listeners.before.event_terminated['dapui_config'] = dapui.close
     dap.listeners.before.event_exited['dapui_config'] = dapui.close
 
+    -- Find the nearest go.mod to determine the service root in a monorepo
+    local function find_go_module_root()
+      local path = vim.fn.expand '%:p:h'
+      while path ~= '/' do
+        if vim.fn.filereadable(path .. '/go.mod') == 1 then
+          return path
+        end
+        path = vim.fn.fnamemodify(path, ':h')
+      end
+      return vim.fn.getcwd()
+    end
+
     -- Install golang specific config
     require('dap-go').setup {
       delve = {
         -- On Windows delve must be run attached or it crashes.
         -- See https://github.com/leoluz/nvim-dap-go/blob/main/README.md#configuring
         detached = vim.fn.has 'win32' == 0,
+        cwd = find_go_module_root(),
+      },
+    }
+
+    -- Add monorepo-aware Go launch configs
+    table.insert(dap.configurations.go, 1, {
+      type = 'go',
+      name = 'Launch Service (nearest go.mod)',
+      request = 'launch',
+      program = function()
+        return find_go_module_root()
+      end,
+      cwd = function()
+        return find_go_module_root()
+      end,
+    })
+
+    table.insert(dap.configurations.go, {
+      type = 'go',
+      name = 'Attach to running service',
+      request = 'attach',
+      mode = 'local',
+      processId = require('dap.utils').pick_process,
+    })
+
+    -- Rust/C/C++ debug config via codelldb
+    dap.adapters.codelldb = {
+      type = 'server',
+      port = '${port}',
+      executable = {
+        command = vim.fn.stdpath 'data' .. '/mason/bin/codelldb',
+        args = { '--port', '${port}' },
+      },
+    }
+    dap.configurations.rust = {
+      {
+        name = 'Launch',
+        type = 'codelldb',
+        request = 'launch',
+        program = function()
+          return vim.fn.input('Path to executable: ', vim.fn.getcwd() .. '/target/debug/', 'file')
+        end,
+        cwd = '${workspaceFolder}',
+        stopOnEntry = false,
       },
     }
   end,
