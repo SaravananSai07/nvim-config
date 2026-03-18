@@ -53,6 +53,17 @@ return {
   },
 
   {
+    'saecki/crates.nvim',
+    event = 'BufRead Cargo.toml',
+    opts = {
+      completion = {
+        cmp = { enabled = false },
+        crates = { enabled = true },
+      },
+    },
+  },
+
+  {
     'MeanderingProgrammer/render-markdown.nvim',
     dependencies = { 'nvim-treesitter/nvim-treesitter', 'nvim-tree/nvim-web-devicons' },
     ft = { 'markdown' }, -- Load only for markdown files
