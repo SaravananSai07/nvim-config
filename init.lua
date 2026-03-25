@@ -965,9 +965,11 @@ require('lazy').setup({
       vim.list_extend(ensure_installed, {
         'stylua', -- Used to format Lua code
       })
+      local release = vim.uv.os_uname().release:lower()
+      local is_mobile = release:find('android') or release:find('ish')
       require('mason-tool-installer').setup {
         ensure_installed = ensure_installed,
-        run_on_start = true,
+        run_on_start = not is_mobile,
       }
 
       require('mason-lspconfig').setup {
