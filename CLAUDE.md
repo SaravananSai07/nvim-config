@@ -11,9 +11,7 @@ lua/custom/plugins/               — User plugins (auto-loaded by lazy.nvim)
   init.lua                        — takku, gitvu, crates.nvim, render-markdown
   codecompanion.lua               — Ollama AI chat
   copilot.lua                     — GitHub Copilot
-  cursor_chat.lua                 — Custom cursor-agent integration
   tiny-diagnostics.lua            — Inline diagnostics
-lua/custom/cursor_chat/           — Custom cursor-agent plugin (main, ui, context, history)
 lua/kickstart/plugins/            — Optional kickstart modules
   debug.lua                       — DAP (nvim-dap + dap-ui)
   autopairs.lua                   — nvim-autopairs
@@ -187,24 +185,6 @@ Leader key: `<Space>`
 | `<leader>t` | n | Goto file |
 | `<leader>tl` | n | Show list |
 
-### Cursor Agent
-
-| Key | Mode | Action |
-|-----|------|--------|
-| `<leader>cc` | n | Open chat |
-| `<leader>cc` | v | Open chat with selection |
-| `<leader>cf` | n | Chat with current file context |
-| `<leader>cs` | v | Send selection to chat |
-| `<leader>cx` | n | Close chat |
-| `<leader>cv` | n | Toggle chat visibility |
-| `<leader>cm` | n | Change model |
-| `<leader>ca` | n | Accept change |
-| `<leader>cr` | n | Reject change |
-| `<leader>cA` | n | Accept all changes |
-| `<leader>cR` | n | Reject all changes |
-| `<leader>cu` | n | Undo last change |
-| `<leader>cU` | n | Undo all changes |
-
 ### Copilot (insert mode)
 
 | Key | Mode | Action |
@@ -242,7 +222,6 @@ Leader key: `<Space>`
 
 - **takku.nvim** (`~/SS/takku.nvim`) — File switching/tracking
 - **gitvu** (`~/SS/gitvu`) — Blame lens + merge conflict resolution
-- **cursor_chat** — Full cursor-agent CLI integration with streaming, auth, context, history
 
 ## Notable Patterns
 

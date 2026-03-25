@@ -159,22 +159,6 @@ return {
     config = function(_, opts)
       require('render-markdown').setup(opts)
       
-      -- Control render-markdown behavior for different buffers
-      vim.api.nvim_create_autocmd({ 'BufEnter', 'BufWinEnter' }, {
-        pattern = '*',
-        callback = function()
-          local bufname = vim.api.nvim_buf_get_name(0)
-          if bufname:match('Cursor Input') then
-            -- Disable render-markdown for chat input to prevent invisible text
-            vim.cmd('RenderMarkdown disable')
-            vim.wo.conceallevel = 0
-            vim.wo.concealcursor = ''
-          elseif vim.bo.filetype == 'markdown' then
-            -- For regular markdown files, use full rendering
-            vim.cmd('RenderMarkdown enable')
-          end
-        end,
-      })
     end,
   },
 
