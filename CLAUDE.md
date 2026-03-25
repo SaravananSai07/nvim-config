@@ -220,8 +220,8 @@ Leader key: `<Space>`
 
 ## Custom Plugins (local dev)
 
-- **takku.nvim** (`~/SS/takku.nvim`) — File switching/tracking
-- **gitvu** (`~/SS/gitvu`) — Blame lens + merge conflict resolution
+- **takku.nvim** (`SaravananSai07/takku.nvim`) — File switching/tracking
+- **gitvu** (`SaravananSai07/gitvu`) — Blame lens + merge conflict resolution
 
 ## Notable Patterns
 

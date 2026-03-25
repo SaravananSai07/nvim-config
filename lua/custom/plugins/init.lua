@@ -6,7 +6,6 @@ return {
 
   {
     'SaravananSai07/takku.nvim',
-    dir = '~/SS/takku.nvim',
     dependencies = {
       'nvim-telescope/telescope.nvim',
     },
@@ -30,7 +29,6 @@ return {
 
   {
     'SaravananSai07/gitvu',
-    dir = '~/SS/gitvu',
     opts = {
       {
         keymaps = {
